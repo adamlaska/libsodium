@@ -172,19 +172,18 @@ fe25519_pow22523(fe25519 out, const fe25519 z)
 }
 
 static inline void
-fe25519_cneg(fe25519 h, const fe25519 f, unsigned int b)
+fe25519_cneg(fe25519 h, unsigned int b)
 {
     fe25519 negf;
 
-    fe25519_neg(negf, f);
-    fe25519_copy(h, f);
+    fe25519_neg(negf, h);
     fe25519_cmov(h, negf, b);
 }
 
 static inline void
-fe25519_abs(fe25519 h, const fe25519 f)
+fe25519_abs(fe25519 h)
 {
-    fe25519_cneg(h, f, fe25519_isnegative(f));
+    fe25519_cneg(h, fe25519_isnegative(h));
 }
 
 static void
@@ -260,7 +259,7 @@ fe25519_notsquare(const fe25519 x)
  r = p + q
  */
 
-void
+static void
 ge25519_add_cached(ge25519_p1p1 *r, const ge25519_p3 *p, const ge25519_cached *q)
 {
     fe25519 t0;
@@ -321,6 +320,8 @@ slide_vartime(signed char *r, const unsigned char *a)
     }
 }
 
+static volatile unsigned char optblocker_u8;
+
 int
 ge25519_frombytes(ge25519_p3 *h, const unsigned char *s)
 {
@@ -353,7 +354,7 @@ ge25519_frombytes(ge25519_p3 *h, const unsigned char *s)
     fe25519_cmov(h->X, x_sqrtm1, 1 - has_m_root);
 
     fe25519_neg(negx, h->X);
-    fe25519_cmov(h->X, negx, fe25519_isnegative(h->X) ^ (s[31] >> 7));
+    fe25519_cmov(h->X, negx, fe25519_isnegative(h->X) ^ (((s[31] >> 5) ^ optblocker_u8) >> 2));
     fe25519_mul(h->T, h->X, h->Y);
 
     return (has_m_root | has_p_root) - 1;
@@ -471,6 +472,18 @@ ge25519_p1p1_to_p3(ge25519_p3 *r, const ge25519_p1p1 *p)
     fe25519_mul(r->T, p->X, p->Y);
 }
 
+/*
+ r = p
+ */
+void
+ge25519_p2_to_p3(ge25519_p3 *r, const ge25519_p2 *p)
+{
+    fe25519_copy(r->X, p->X);
+    fe25519_copy(r->Y, p->Y);
+    fe25519_copy(r->Z, p->Z);
+    fe25519_mul(r->T, p->X, p->Y);
+}
+
 static void
 ge25519_p2_0(ge25519_p2 *h)
 {
@@ -521,7 +534,7 @@ ge25519_cached_0(ge25519_cached *h)
  r = p
  */
 
-void
+static void
 ge25519_p3_to_cached(ge25519_cached *r, const ge25519_p3 *p)
 {
     fe25519_add(r->YplusX, p->Y, p->X);
@@ -596,26 +609,39 @@ ge25519_precomp_0(ge25519_precomp *h)
 static unsigned char
 equal(signed char b, signed char c)
 {
-    unsigned char ub = b;
-    unsigned char uc = c;
-    unsigned char x  = ub ^ uc; /* 0: yes; 1..255: no */
-    uint32_t      y  = (uint32_t) x; /* 0: yes; 1..255: no */
+#if defined(HAVE_INLINE_ASM) && defined(__x86_64__)
+    int32_t b32 = (int32_t) b, c32 = (int32_t) c, q32, z32;
+    __asm__ ("xorl %0,%0\n movl $1,%1\n cmpb %b3,%b2\n cmovel %1,%0" :
+             "=&r"(z32), "=&r"(q32) : "q"(b32), "q"(c32) : "cc");
+    return (unsigned char) z32;
+#elif defined(HAVE_INLINE_ASM) && defined(__aarch64__)
+    unsigned char z;
+    __asm__ ("and %w0,%w1,255\n cmp %w0,%w2,uxtb\n cset %w0,eq" :
+             "=&r"(z) : "r"(b), "r"(c) : "cc");
+    return z;
+#else
+    const unsigned char x  = (unsigned char) b ^ (unsigned char) c; /* 0: yes; 1..255: no */
+    uint32_t            y  = (uint32_t) x; /* 0: yes; 1..255: no */
 
-    y -= 1;   /* 4294967295: yes; 0..254: no */
-    y >>= 31; /* 1: yes; 0: no */
-
-    return y;
+    y--;
+    return ((y >> 29) ^ optblocker_u8) >> 2; /* 1: yes; 0: no */
+#endif
 }
 
 static unsigned char
 negative(signed char b)
 {
-    /* 18446744073709551361..18446744073709551615: yes; 0..255: no */
-    uint64_t x = b;
-
-    x >>= 63; /* 1: yes; 0: no */
-
+#if defined(HAVE_INLINE_ASM) && defined(__x86_64__)
+    __asm__ ("shrb $7,%0" : "+r"(b) : : "cc");
+    return b;
+#elif defined(HAVE_INLINE_ASM) && defined(__aarch64__)
+    uint8_t x;
+    __asm__ ("ubfx %w0,%w1,7,1" : "=r"(x) : "r"(b) : );
     return x;
+#else
+    const uint8_t x = (uint8_t) b; /* 0..127: no 128..255: yes */
+    return ((x >> 5) ^ optblocker_u8) >> 2; /* 1: yes; 0: no */
+#endif
 }
 
 static void
@@ -697,7 +723,7 @@ ge25519_cmov8_cached(ge25519_cached *t, const ge25519_cached cached[8], const si
  r = p - q
  */
 
-void
+static void
 ge25519_sub_cached(ge25519_p1p1 *r, const ge25519_p3 *p, const ge25519_cached *q)
 {
     fe25519 t0;
@@ -988,8 +1014,18 @@ ge25519_p3p3_dbl(ge25519_p3 *r, const ge25519_p3 *p)
     ge25519_p1p1_to_p3(r, &p1p1);
 }
 
-/* r = p+q */
+/* r = -p */
 static void
+ge25519_p3_neg(ge25519_p3 *r, const ge25519_p3 *p)
+{
+    fe25519_neg(r->X, p->X);
+    fe25519_copy(r->Y, p->Y);
+    fe25519_copy(r->Z, p->Z);
+    fe25519_neg(r->T, p->T);
+}
+
+/* r = p+q */
+void
 ge25519_p3_add(ge25519_p3 *r, const ge25519_p3 *p, const ge25519_p3 *q)
 {
     ge25519_cached q_cached;
@@ -998,6 +1034,16 @@ ge25519_p3_add(ge25519_p3 *r, const ge25519_p3 *p, const ge25519_p3 *q)
     ge25519_p3_to_cached(&q_cached, q);
     ge25519_add_cached(&p1p1, p, &q_cached);
     ge25519_p1p1_to_p3(r, &p1p1);
+}
+
+/* r = p-q */
+void
+ge25519_p3_sub(ge25519_p3 *r, const ge25519_p3 *p, const ge25519_p3 *q)
+{
+    ge25519_p3 q_neg;
+
+    ge25519_p3_neg(&q_neg, q);
+    ge25519_p3_add(r, p, &q_neg);
 }
 
 /* r = r*(2^n)+q */
@@ -1119,59 +1165,29 @@ ge25519_is_canonical(const unsigned char *s)
 }
 
 int
-ge25519_has_small_order(const unsigned char s[32])
+ge25519_has_small_order(const ge25519_p3 *p)
 {
-    CRYPTO_ALIGN(16)
-    static const unsigned char blocklist[][32] = {
-        /* 0 (order 4) */
-        { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-        /* 1 (order 1) */
-        { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-        /* 2707385501144840649318225287225658788936804267575313519463743609750303402022
-           (order 8) */
-        { 0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4,
-          0x89, 0xf2, 0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6,
-          0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05 },
-        /* 55188659117513257062467267217118295137698188065244968500265048394206261417927
-           (order 8) */
-        { 0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b,
-          0x76, 0x0d, 0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39,
-          0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a },
-        /* p-1 (order 2) */
-        { 0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f },
-        /* p (=0, order 4) */
-        { 0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f },
-        /* p+1 (=1, order 1) */
-        { 0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f }
-    };
-    unsigned char c[7] = { 0 };
-    unsigned int  k;
-    size_t        i, j;
+    fe25519 recip;
+    fe25519 x;
+    fe25519 x_neg;
+    fe25519 y;
+    fe25519 y_sqrtm1;
+    fe25519 c;
+    int     ret = 0;
 
-    COMPILER_ASSERT(7 == sizeof blocklist / sizeof blocklist[0]);
-    for (j = 0; j < 31; j++) {
-        for (i = 0; i < sizeof blocklist / sizeof blocklist[0]; i++) {
-            c[i] |= s[j] ^ blocklist[i][j];
-        }
-    }
-    for (i = 0; i < sizeof blocklist / sizeof blocklist[0]; i++) {
-        c[i] |= (s[j] & 0x7f) ^ blocklist[i][j];
-    }
-    k = 0;
-    for (i = 0; i < sizeof blocklist / sizeof blocklist[0]; i++) {
-        k |= (c[i] - 1);
-    }
-    return (int) ((k >> 8) & 1);
+    fe25519_invert(recip, p->Z);
+    fe25519_mul(x, p->X, recip);
+    ret |= fe25519_iszero(x);
+    fe25519_mul(y, p->Y, recip);
+    ret |= fe25519_iszero(y);
+    fe25519_neg(x_neg, p->X);
+    fe25519_mul(y_sqrtm1, y, fe25519_sqrtm1);
+    fe25519_sub(c, y_sqrtm1, x);
+    ret |= fe25519_iszero(c);
+    fe25519_sub(c, y_sqrtm1, x_neg);
+    ret |= fe25519_iszero(c);
+
+    return ret;
 }
 
 /*
@@ -2621,7 +2637,7 @@ ge25519_xmont_to_ymont(fe25519 y, const fe25519 x)
 }
 
 /* multiply by the cofactor */
-static void
+void
 ge25519_clear_cofactor(ge25519_p3 *p3)
 {
     ge25519_p1p1 p1;
@@ -2776,7 +2792,7 @@ ristretto255_sqrt_ratio_m1(fe25519 x, const fe25519 u, const fe25519 v)
     fe25519_mul(x_sqrtm1, x, fe25519_sqrtm1); /* x*sqrt(-1) */
 
     fe25519_cmov(x, x_sqrtm1, has_p_root | has_f_root);
-    fe25519_abs(x, x);
+    fe25519_abs(x);
 
     return has_m_root | has_p_root;
 }
@@ -2841,7 +2857,7 @@ ristretto255_frombytes(ge25519_p3 *h, const unsigned char *s)
 
     fe25519_mul(h->X, h->X, s_);
     fe25519_add(h->X, h->X, h->X);
-    fe25519_abs(h->X, h->X);
+    fe25519_abs(h->X);
     fe25519_mul(h->Y, u1, h->Y);
     fe25519_1(h->Z);
     fe25519_mul(h->T, h->X, h->Y);
@@ -2900,11 +2916,11 @@ ristretto255_p3_tobytes(unsigned char *s, const ge25519_p3 *h)
     fe25519_cmov(den_inv, eden, rotate);
 
     fe25519_mul(x_z_inv, x_, z_inv);
-    fe25519_cneg(y_, y_, fe25519_isnegative(x_z_inv));
+    fe25519_cneg(y_, fe25519_isnegative(x_z_inv));
 
     fe25519_sub(s_, h->Z, y_);
     fe25519_mul(s_, den_inv, s_);
-    fe25519_abs(s_, s_);
+    fe25519_abs(s_);
     fe25519_tobytes(s, s_);
 }
 
@@ -2936,7 +2952,7 @@ ristretto255_elligator(ge25519_p3 *p, const fe25519 t)
 
     wasnt_square = 1 - ristretto255_sqrt_ratio_m1(s, u, v);
     fe25519_mul(s_prime, s, t);
-    fe25519_abs(s_prime, s_prime);
+    fe25519_abs(s_prime);
     fe25519_neg(s_prime, s_prime);     /* s_prime = -|s*t| */
     fe25519_cmov(s, s_prime, wasnt_square);
     fe25519_cmov(c, r, wasnt_square);
@@ -2963,8 +2979,6 @@ void
 ristretto255_from_hash(unsigned char s[32], const unsigned char h[64])
 {
     fe25519        r0, r1;
-    ge25519_cached p1_cached;
-    ge25519_p1p1   p_p1p1;
     ge25519_p3     p0, p1;
     ge25519_p3     p;
 
@@ -2972,8 +2986,6 @@ ristretto255_from_hash(unsigned char s[32], const unsigned char h[64])
     fe25519_frombytes(r1, h + 32);
     ristretto255_elligator(&p0, r0);
     ristretto255_elligator(&p1, r1);
-    ge25519_p3_to_cached(&p1_cached, &p1);
-    ge25519_add_cached(&p_p1p1, &p0, &p1_cached);
-    ge25519_p1p1_to_p3(&p, &p_p1p1);
+    ge25519_p3_add(&p, &p0, &p1);
     ristretto255_p3_tobytes(s, &p);
 }

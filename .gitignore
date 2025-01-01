@@ -154,6 +154,7 @@ test/default/secretbox_easy2
 test/default/secretstream_xchacha20poly1305
 test/default/shorthash
 test/default/sign
+test/default/sign2
 test/default/siphashx24
 test/default/sodium_core
 test/default/sodium_utils
@@ -168,5 +169,6 @@ test/default/verify1
 test/default/xchacha20
 test/js.done
 testing
+.zig-cache
 zig-cache
 zig-out
