@@ -32,21 +32,22 @@
 #   define HAVE_LINUX_COMPATIBLE_GETRANDOM
 #  endif
 # endif
+#elif defined(__midipix__)
+# define HAVE_LINUX_COMPATIBLE_GETRANDOM
 #elif defined(__FreeBSD__)
 # include <sys/param.h>
 # if defined(__FreeBSD_version) && __FreeBSD_version >= 1200000
 #  define HAVE_LINUX_COMPATIBLE_GETRANDOM
 # endif
 #endif
+#ifdef HAVE_COMMONCRYPTO_COMMONRANDOM_H
+# include <CommonCrypto/CommonRandom.h>
+#endif
 #if !defined(NO_BLOCKING_RANDOM_POLL) && defined(__linux__)
 # define BLOCK_ON_DEV_RANDOM
 #endif
 #ifdef BLOCK_ON_DEV_RANDOM
 # include <poll.h>
-#endif
-#ifdef HAVE_RDRAND
-# pragma GCC target("rdrnd")
-# include <immintrin.h>
 #endif
 
 #include "core.h"
@@ -93,12 +94,25 @@ BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer, ULONG RandomBufferLength);
 # endif
 #endif
 
+#if !defined(TLS) && !defined(__STDC_NO_THREADS__) && \
+    defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+# define TLS _Thread_local
+#endif
 #ifndef TLS
 # ifdef _WIN32
 #  define TLS __declspec(thread)
 # else
 #  define TLS
 # endif
+#endif
+
+#ifdef HAVE_RDRAND
+# ifdef __clang__
+#  pragma clang attribute push(__attribute__((target("rdrnd"))), apply_to = function)
+# elif defined(__GNUC__)
+#  pragma GCC target("rdrnd")
+# endif
+# include <immintrin.h>
 #endif
 
 typedef struct InternalRandomGlobal_ {
@@ -175,7 +189,18 @@ randombytes_internal_random_init(void)
 
 #else /* _WIN32 */
 
-# ifdef HAVE_GETENTROPY
+# ifdef HAVE_COMMONCRYPTO_COMMONRANDOM_H
+static int
+randombytes_getentropy(void * const buf, const size_t size)
+{
+    if (CCRandomGenerateBytes(buf, size) != kCCSuccess) {
+        return -1;
+    }
+    return 0;
+}
+
+# elif defined(HAVE_GETENTROPY)
+
 static int
 _randombytes_getentropy(void * const buf, const size_t size)
 {
@@ -635,3 +660,9 @@ struct randombytes_implementation randombytes_internal_implementation = {
     SODIUM_C99(.buf =) randombytes_internal_random_buf,
     SODIUM_C99(.close =) randombytes_internal_random_close
 };
+
+#ifdef HAVE_RDRAND
+# ifdef __clang__
+#  pragma clang attribute pop
+# endif
+#endif
